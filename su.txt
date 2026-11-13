@@ -1,0 +1,115 @@
+surange < ozdata.04.su
+
+
+1. Visualization:
+
+suxwigb < ozdata.04.su perc=90 title="Full Dataset - Wiggle Plot" &
+suximage < ozdata.04.su perc=90 title="Full Dataset - Image Plot" &
+
+suwind < ozdata.04.su key=tracl min=1 max=25 | suxwigb perc=90 title="First 25 Traces - Wiggle" &
+suwind < ozdata.04.su key=tracl min=1 max=25 | suximage perc=90 title="First 25 Traces - Image" &
+
+
+
+
+2. Muting and Editing:
+
+sumute < ozdata.07.su key=tracf xmute=4,17,25,32,44 tmute=1.15,0.6,0,0.65,1.1 > data_mute2.su
+sukill < data_mute2.su key=tracl a=10 > data2_edit.su
+
+
+
+
+3. Gain:
+
+sugain < ozdata.04.su tpow=2 > data_gain_tpow.su
+sugain < ozdata.04.su qbal=1 > data_gain_qbal.su 
+sugain < ozdata.04.su qclip=0.95 > data_gain_qclip.su
+
+
+
+
+4. Auto-correlation:
+
+suacor < ozdata.04.su ntout=1001 sym=0 > data-ac.su
+
+
+
+
+5. Deconvolution:
+
+supef < ozdata.04_gain.su > ozdata.04_dec.su minlag=0.004 maxlag=0.2 pnoise=0.001 mincorr=0 maxcorr=3
+
+
+
+
+6. CDP Gather:
+
+suwind < ozdata.07.su key=tracl min=1 max=24 > p7_ozdata.07_left.su
+suwind < ozdata.07.su key=tracl min=25 max=48 > p7_ozdata.07_right.su
+
+sushw < p7_ozdata.07_left.su key=offset a=-2600 b=100 > p7_left.su
+sushw < p7_ozdata.07_right.su key=offset a=300 b=100 > p7_right.su
+
+cat p7_left.su p7_right.su > p7_ozdata.07_merg.su
+
+sushw < p7_ozdata.07_merg.su key=cdp a=11 b=0 > p7_ozdata.07_cdp.su
+sugethw < p7_ozdata.07_cdp.su key=offset,cdp 
+
+
+
+
+7. Perform NMO and display seismic data after velocity picking:
+
+gedit Velan &
+sh Velan
+gedit stkvel.p1 &
+gedit nmo &
+sunmo < p7_ozdata.07_cdp.su cdp=11 tnmo=0.301921,0.456165,0.473304,0.61041,0.644687,0.738947,0.790362,0.867485,1.99861,2.05003,2.71842,3.81528,4.44939 vnmo1841.86,2288.37,1775.58,1716.28,1974.42,1824.42,2054.65,1817.44,2358.14,2752.33,2159.3,2372.09,2079.07 > nmoout.su
+sh nmo
+
+
+
+
+8. Perform Velocity Analysis and NMO Correction:
+chmod +x ./iva.sh
+./iva.sh "cmp1=180 numCMPs=1" velfiltcdpsmuterstat.su vpick.txt vpickorig.txt 7000 100
+sunmo < velfiltcdpsmuterstat.su par=vpick.txt > nmo.su
+suximage < nmo.su perc=99 &
+sustack < nmo.su key=cdp normpow=1 > nmostack.su
+suximage < nmostack.su perc=99 &
+
+
+
+
+9. DMO:
+sed 's/nmo/dmo/g; s/\\//g' vpick.txt > dmo.txt
+susort offset cdp < nmo.su | sudmofk par=dmo.txt cdpmin=101 cdpmax=636 dxcdp=1 noffmix=9 > dmo.su
+susort cdp offset < dmo.su | sustack key=cdp normpow=1 > dmostack.su
+suximage < dmostack.su perc=98 title="DMO Stack" &
+
+
+
+
+10. Stacking:
+ls -lh velfiltcdpsmuterstat.su vpick1.txt sourcestatic1.dat recstatic1.dat
+sunmo < velfiltcdpsmuterstat.su par=vpick.txt | sushw key=tstat a=0 | sushw key=sstat a=0 | sushw key=gstat a=0 | sustatic hdrs=3 sou_file=sourcestatic1.dat rec_file=recstatic1.dat ns=167 nr=668 no=96 | sustack key=cdp normpow=1 > rstack3.su
+suximage < rstack3.su perc=90 title="Final Stacked Section (rstack3.su)" &
+
+
+
+
+11.
+
+Interpolate Velocity Field:
+chmod +x ./010_Velocity_Interp_IVA.sh
+./010_Velocity_Interp_IVA.sh
+
+Generate Stacked Input:
+sunmo < velfiltcdpsmuterstat.su par=vpick.txt | sushw key=tstat a=0 | sushw key=sstat a=0 | sushw key=gstat a=0 | sustatic hdrs=3 sou_file=sourcestatic1.dat rec_file=recstatic1.dat ns=167 nr=668 no=96 | sustack key=cdp normpow=1 > rstack3.su
+
+Execute Post-Stack Kirchhoff Migration:
+sufrac < rstack3.su power=.5 sign=1 | suktmig2d vfile=stkvel1.intp2.bin dx=55 hoffset=0 verbose=1 dcdp=1 fcdpdata=1 firstcdp=101 > mig1.su
+
+Visualize the migrated image:
+suximage < rstack3.su perc=90 title="Final Stacked Section (rstack3.su)" &
