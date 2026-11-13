@@ -1,0 +1,150 @@
+%% ============================================================
+% PRACTICAL 7: SEMBLANCE ANALYSIS (SEG-Y Input)
+%
+% Objective: Estimate stacking velocities from a CMP gather using
+% semblance analysis.
+% Note: Requires the SegyMAT toolbox (ReadSegy.m) in your MATLAB path.
+% ============================================================
+clear;
+clc;
+close all;
+
+%% 1. LOAD SEISMIC DATA (.segy)
+filename = 'oz_07.segy'; % Replace with your .segy filename
+
+% Read SEG-Y file using SegyMAT
+[seismic_data, SegyTraceHeaders, SegyHeader] = ReadSegy(filename);
+seismic_data = double(seismic_data);
+
+% Ensure data dimensions are (time samples x traces)
+[nt, nh] = size(seismic_data);
+
+fprintf('SEG-Y file loaded: %s (%d samples, %d traces)\n', filename, nt, nh);
+
+%% 2. TIME VECTOR & OFFSET SETUP (FROM SEG-Y HEADERS)
+% Extract sampling interval 'dt' directly from SEG-Y header (microseconds -> seconds)
+dt_us = SegyHeader.dt;
+if isempty(dt_us) || dt_us == 0
+    dt_us = SegyTraceHeaders(1).dt; % Fallback to trace header
+end
+dt = dt_us * 1e-6;
+t  = (0:nt-1)' * dt;
+
+% Extract source-receiver offsets from SEG-Y trace headers (Bytes 37-40)
+if isfield(SegyTraceHeaders, 'offset')
+    h = [SegyTraceHeaders.offset]';
+    
+    % Apply coordinate/offset scalar if present in SEG-Y trace header
+    if isfield(SegyTraceHeaders, 'ScalarTraceHeader') && SegyTraceHeaders(1).ScalarTraceHeader < 0
+        h = h / abs(SegyTraceHeaders(1).ScalarTraceHeader);
+    elseif isfield(SegyTraceHeaders, 'ScalarTraceHeader') && SegyTraceHeaders(1).ScalarTraceHeader > 0
+        h = h * SegyTraceHeaders(1).ScalarTraceHeader;
+    end
+else
+    h = zeros(nh, 1);
+end
+
+% Fallback to default 48-trace split-spread offsets if offset headers are empty/zero
+if all(h == 0)
+    warning('Offset headers are zero in SEG-Y. Using default 48-trace split-spread offsets.');
+    if nh == 48
+        h = [-2550:100:-250, 250:100:2550]';
+    else
+        error('Offset headers are missing and trace count (%d) does not match default 48-trace sequence.', nh);
+    end
+end
+
+h = h(:);
+
+if length(h) ~= nh
+    error('Offset count (%d) does not match number of traces (%d).', length(h), nh);
+end
+
+fprintf('Sampling interval: %.4f s | Offset range: %.0f m to %.0f m\n', ...
+    dt, min(h), max(h));
+
+%% 3. DISPLAY ORIGINAL CMP GATHER
+figure('Name', 'Original CMP Gather', 'NumberTitle', 'off');
+imagesc(h, t, seismic_data);
+set(gca, 'YDir', 'reverse');
+xlabel('Offset (m)');
+ylabel('Two-Way Traveltime (s)');
+title(['Original CMP Gather - ', filename], 'Interpreter', 'none');
+colormap(gray);
+colorbar;
+axis tight;
+
+%% 4. DEFINE TRIAL VELOCITY RANGE
+vmin = 1000;       % Minimum velocity (m/s)
+vmax = 4000;       % Maximum velocity (m/s)
+dv   = 50;         % Velocity increment (m/s)
+velocities = vmin:dv:vmax;
+nv = length(velocities);
+
+fprintf('Scanning %d velocities from %d to %d m/s (step: %d m/s)...\n', ...
+    nv, vmin, vmax, dv);
+
+%% 5. COMPUTE SEMBLANCE PANEL
+semblance = zeros(nt, nv);
+
+for iv = 1:nv
+    vtrial = velocities(iv);
+    nmo_trial = zeros(nt, nh);
+    
+    % Step 1 & 2: Apply trial NMO to align traces
+    for ih = 1:nh
+        offset = h(ih);
+        t_nmo = sqrt(t.^2 + (offset^2 / vtrial^2));
+        
+        nmo_trial(:, ih) = interp1(t, seismic_data(:, ih), t_nmo, 'linear', 0);
+    end
+    
+    % Step 3: Compute semblance S(t, v) = [sum(d_i)]^2 / [N * sum(d_i^2)]
+    numerator = sum(nmo_trial, 2).^2;
+    denominator = nh * sum(nmo_trial.^2, 2);
+    
+    S = zeros(nt, 1);
+    valid = denominator > eps;
+    S(valid) = numerator(valid) ./ denominator(valid);
+    
+    semblance(:, iv) = S;
+end
+fprintf('Semblance calculation complete.\n');
+
+%% 6. AUTOMATIC MAXIMUM SEMBLANCE VELOCITY PICKING
+[~, max_idx] = max(semblance, [], 2);
+auto_v = velocities(max_idx);
+
+%% 7. DISPLAY SEMBLANCE PANELS
+% Semblance Panel
+figure('Name', 'Semblance Panel', 'NumberTitle', 'off');
+imagesc(velocities, t, semblance);
+set(gca, 'YDir', 'reverse');
+xlabel('Trial Stacking Velocity (m/s)');
+ylabel('Two-Way Traveltime (s)');
+title('Semblance Spectrum S(t, v)');
+colormap(jet);
+colorbar;
+clim([0 1]);
+axis tight;
+
+% Semblance Panel with maximum semblance trajectory
+figure('Name', 'Semblance with Auto-Pick', 'NumberTitle', 'off');
+imagesc(velocities, t, semblance);
+set(gca, 'YDir', 'reverse');
+hold on;
+plot(auto_v, t, 'w', 'LineWidth', 1.5);
+xlabel('Trial Stacking Velocity (m/s)');
+ylabel('Two-Way Traveltime (s)');
+title('Semblance Panel with Maximum Energy Picks');
+colormap(jet);
+colorbar;
+clim([0 1]);
+axis tight;
+hold off;
+
+%% 8. SAVE PRACTICAL 7 OUTPUTS
+save('practical7_semblance_results.mat', ...
+    't', 'dt', 'h', 'velocities', 'semblance', 'auto_v', ...
+    'SegyHeader', 'SegyTraceHeaders');
+fprintf('Semblance results and SEG-Y headers saved to practical7_semblance_results.mat\n');

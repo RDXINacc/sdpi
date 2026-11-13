@@ -1,0 +1,164 @@
+%% ============================================================
+% PRACTICAL 8: DIP MOVEOUT (DMO) CORRECTION IN F-K DOMAIN (SEG-Y Input)
+%
+% Objective: Perform DMO on NMO-corrected CMP data and compare 
+%            results before and after DMO.
+% Note: Requires the SegyMAT toolbox (ReadSegy.m & WriteSegyStructure.m).
+% ============================================================
+clear;
+clc;
+close all;
+
+%% 1. INPUT: LOAD NMO-CORRECTED CMP GATHER (.segy)
+segy_file = 'oz_04_nmo.segy'; % Replace with your NMO-corrected .segy filename
+
+if exist(segy_file, 'file') == 2
+    [nmo_data, SegyTraceHeaders, SegyHeader] = ReadSegy(segy_file);
+    nmo_data = double(nmo_data);
+    
+    % Extract sampling interval 'dt' (microseconds -> seconds)
+    dt_us = SegyHeader.dt;
+    if isempty(dt_us) || dt_us == 0
+        dt_us = SegyTraceHeaders(1).dt;
+    end
+    dt = dt_us * 1e-6;
+    
+    [nt, nh] = size(nmo_data);
+    t = (0:nt-1)' * dt;
+    
+    % Extract source-receiver offsets from trace headers (Bytes 37-40 in SEG-Y)
+    if isfield(SegyTraceHeaders, 'offset')
+        h = [SegyTraceHeaders.offset]';
+        % Apply coordinate/offset scalar if present in SEG-Y header
+        if isfield(SegyTraceHeaders, 'ScalarTraceHeader') && SegyTraceHeaders(1).ScalarTraceHeader < 0
+            h = h / abs(SegyTraceHeaders(1).ScalarTraceHeader);
+        elseif isfield(SegyTraceHeaders, 'ScalarTraceHeader') && SegyTraceHeaders(1).ScalarTraceHeader > 0
+            h = h * SegyTraceHeaders(1).ScalarTraceHeader;
+        end
+    else
+        h = zeros(nh, 1);
+    end
+    
+    % Fallback if offset headers are empty/zero in the SEG-Y file
+    if all(h == 0)
+        warning('Offset headers are zero in SEG-Y. Assigning default symmetric offset array.');
+        h = linspace(-2550, 2550, nh)';
+    end
+    
+    % Replacement velocity (m/s) - update if known from velocity analysis
+    v_ref = 2000; 
+else
+    % Fallback / standalone synthetic setup if .segy is not found
+    warning('SEG-Y file not found. Generating synthetic NMO gather.');
+    dt = 0.004;
+    t = (0:2534)' * dt;
+    h = [-2550:100:-250, 250:100:2550]';
+    v_ref = 2000;
+    nmo_data = zeros(length(t), length(h));
+    for ih = 1:length(h)
+        t_event = 1.5 + 0.0001 * h(ih);
+        idx = round(t_event / dt);
+        if idx > 0 && idx <= length(t)
+            nmo_data(idx, ih) = 1.0;
+        end
+    end
+    [nt, nh] = size(nmo_data);
+end
+
+fprintf('Loaded SEG-Y File: %s\n', segy_file);
+fprintf('Gather dimensions: %d samples x %d traces (dt = %.4f s)\n', nt, nh, dt);
+fprintf('Offset range     : %.1f m to %.1f m\n', min(h), max(h));
+fprintf('Mean velocity v  : %.1f m/s\n', v_ref);
+
+%% 2 & 3. BUILD FREQUENCY (omega) AND WAVENUMBER (k) GRIDS
+% Spatial trace spacing (assumed uniform dh)
+dh = mean(diff(sort(abs(h)))); 
+if isnan(dh) || dh == 0
+    dh = 100; % Default spacing in meters
+end
+
+% Next power of 2 for clean FFT
+nfft_t = 2^nextpow2(nt);
+nfft_x = 2^nextpow2(nh);
+
+% Temporal frequency axis f (Hz) and angular frequency omega (rad/s)
+fs = 1 / dt;
+f = (-nfft_t/2 : (nfft_t/2 - 1)) * (fs / nfft_t);
+omega = 2 * pi * f(:); % column vector (nfft_t x 1)
+
+% Spatial frequency / wavenumber axis kx (cycles/m) and k (rad/m)
+ks = 1 / dh;
+kx = (-nfft_x/2 : (nfft_x/2 - 1)) * (ks / nfft_x);
+k = 2 * pi * kx(:)'; % row vector (1 x nfft_x)
+
+%% 4 & 5 & 6. 2D F-K TRANSFORM AND HALE-TYPE PHASE-SHIFT DMO
+% 2D FFT to f-k domain (centered spectrum)
+D_fk = fftshift(fft2(nmo_data, nfft_t, nfft_x));
+
+% Prepare modified f-k spectrum
+D_fk_dmo = zeros(size(D_fk));
+
+fprintf('Applying Hale-type DMO operator...\n');
+
+% Regularization epsilon to prevent division by zero at omega = 0
+eps_w = 1e-4;
+omega_reg = omega;
+omega_reg(abs(omega_reg) < eps_w) = sign(omega_reg(abs(omega_reg) < eps_w) + eps) * eps_w;
+
+for ih = 1:nh
+    h_curr = h(ih); % Actual offset from SEG-Y trace header
+    
+    % Hale phase-shift formulation:
+    phase_shift = (h_curr^2 .* (k.^2)) ./ (2 * v_ref^2);
+    DMO_op = exp(-1i * repmat(phase_shift, nfft_t, 1));
+    
+    % Apply per trace in wavenumber slice
+    D_fk_dmo(:, :) = D_fk_dmo(:, :) + (D_fk .* DMO_op) / nh;
+end
+
+%% 7. INVERSE TRANSFORM BACK TO TIME-OFFSET DOMAIN
+% Inverse FFT2 from f-k to t-x
+dmo_data_padded = real(ifft2(ifftshift(D_fk_dmo)));
+
+% Truncate back to original time and trace dimensions
+dmo_data = dmo_data_padded(1:nt, 1:nh);
+
+fprintf('DMO processing completed.\n');
+
+%% 8. PLOT BEFORE AND AFTER DMO COMPARISON
+figure('Name', 'Practical 8: DMO Comparison', 'NumberTitle', 'off', 'Position', [100 100 1200 600]);
+
+% Before DMO (NMO Corrected)
+subplot(1, 2, 1);
+imagesc(h, t, nmo_data);
+set(gca, 'YDir', 'reverse');
+xlabel('Offset (m)');
+ylabel('Two-Way Traveltime (s)');
+title('Before DMO (NMO-Corrected Gather)');
+colormap(gray);
+colorbar;
+clim([-max(abs(nmo_data(:)))*0.5, max(abs(nmo_data(:)))*0.5]);
+axis tight;
+
+% After DMO
+subplot(1, 2, 2);
+imagesc(h, t, dmo_data);
+set(gca, 'YDir', 'reverse');
+xlabel('Offset (m)');
+ylabel('Two-Way Traveltime (s)');
+title('After DMO (Hale F-K DMO Applied)');
+colormap(gray);
+colorbar;
+clim([-max(abs(dmo_data(:)))*0.5, max(abs(dmo_data(:)))*0.5]);
+axis tight;
+
+sgtitle(['Comparison of CMP Gather Before and After DMO - ', segy_file], 'Interpreter', 'none');
+
+%% 9. SAVE OUTPUT RESULTS TO .SEGY
+output_segy = 'practical8_dmo_results.segy';
+if exist('SegyHeader', 'var') && exist('SegyTraceHeaders', 'var')
+    WriteSegyStructure(output_segy, SegyHeader, SegyTraceHeaders, dmo_data);
+else
+    WriteSegy(output_segy, dmo_data, 'dt', dt * 1e6);
+end
+fprintf('DMO-corrected gather saved to %s\n', output_segy);

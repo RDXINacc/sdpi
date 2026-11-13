@@ -1,0 +1,661 @@
+%% ============================================================
+% PRACTICAL 7 + PRACTICAL 6
+% SEMBLANCE ANALYSIS FOLLOWED BY NMO CORRECTION
+%
+% DATA FILE: oz_04.mat
+%
+% Practical 7:
+%   CMP Gather -> Semblance Analysis -> Velocity Picking
+%
+% Practical 6:
+%   Picked Velocity Function -> NMO Correction -> Stretch Mute
+%
+% ============================================================
+
+clear;
+clc;
+close all;
+
+%% ============================================================
+% 1. LOAD SEISMIC DATA
+% ============================================================
+
+filename = 'oz_04.mat';
+
+data_loaded = load(filename);
+
+fprintf('\nVariables present in %s:\n', filename);
+disp(fieldnames(data_loaded));
+
+% Load seismic data
+seismic_data = double(data_loaded.seismic_data);
+
+% Load headers
+headers = data_loaded.headers;
+
+% Make sure data is samples x traces
+[nt, nh] = size(seismic_data);
+
+if nt < nh
+    seismic_data = seismic_data.';
+    [nt, nh] = size(seismic_data);
+end
+
+fprintf('\n--------------------------------------------\n');
+fprintf('SEISMIC DATA INFORMATION\n');
+fprintf('--------------------------------------------\n');
+fprintf('Number of samples = %d\n', nt);
+fprintf('Number of traces  = %d\n', nh);
+
+%% ============================================================
+% 2. SAMPLING INTERVAL
+% ============================================================
+
+% SU header:
+% dt = 4000 microseconds = 0.004 seconds
+
+dt = 0.004;
+
+% Time vector
+t = (0:nt-1)' * dt;
+
+fprintf('Sampling interval = %.4f seconds\n', dt);
+fprintf('Total record time = %.3f seconds\n', t(end));
+
+%% ============================================================
+% 3. OFFSET VALUES
+% ============================================================
+%
+% The offsets were extracted from the packed SU trace headers
+% of the uploaded oz_04.mat file.
+%
+% There are 48 traces.
+%
+% Offset sequence:
+%
+% -2550 to -250 m, followed by
+% +250 to +2550 m
+%
+% with 100 m spacing.
+%
+% ============================================================
+
+h = [-2550 -2450 -2350 -2250 -2150 -2050 ...
+     -1950 -1850 -1750 -1650 -1550 -1450 ...
+     -1350 -1250 -1150 -1050 -950 -850 ...
+     -750 -650 -550 -450 -350 -250 ...
+      250  350  450  550  650  750 ...
+      850  950 1050 1150 1250 1350 ...
+     1450 1550 1650 1750 1850 1950 ...
+     2050 2150 2250 2350 2450 2550];
+
+h = h(:);
+
+% Check number of offsets
+if length(h) ~= nh
+    error('Number of offsets does not match number of traces.');
+end
+
+fprintf('\n--------------------------------------------\n');
+fprintf('OFFSET INFORMATION\n');
+fprintf('--------------------------------------------\n');
+fprintf('Minimum offset = %.0f m\n', min(h));
+fprintf('Maximum offset = %.0f m\n', max(h));
+fprintf('Number of offsets = %d\n', length(h));
+
+%% ============================================================
+% 4. DISPLAY ORIGINAL CMP GATHER
+% ============================================================
+
+figure;
+
+imagesc(h,t,seismic_data);
+
+set(gca,'YDir','reverse');
+
+xlabel('Offset (m)');
+ylabel('Time (s)');
+title('Original CMP Gather');
+
+colormap(gray);
+colorbar;
+
+axis tight;
+
+%% ============================================================
+%                  PRACTICAL 7
+%                  SEMBLANCE ANALYSIS
+% ============================================================
+
+fprintf('\n\n');
+fprintf('============================================\n');
+fprintf('       PRACTICAL 7: SEMBLANCE ANALYSIS\n');
+fprintf('============================================\n');
+
+%% ============================================================
+% 5. DEFINE TRIAL VELOCITY RANGE
+% ============================================================
+
+vmin = 1000;       % Minimum velocity (m/s)
+vmax = 4000;       % Maximum velocity (m/s)
+dv   = 50;         % Velocity increment (m/s)
+
+velocities = vmin:dv:vmax;
+
+nv = length(velocities);
+
+fprintf('\nTrial velocity range = %d to %d m/s\n', ...
+    vmin,vmax);
+
+fprintf('Velocity increment = %d m/s\n',dv);
+
+fprintf('Number of trial velocities = %d\n',nv);
+
+%% ============================================================
+% 6. INITIALIZE SEMBLANCE MATRIX
+% ============================================================
+
+semblance = zeros(nt,nv);
+
+%% ============================================================
+% 7. SEMBLANCE CALCULATION
+% ============================================================
+
+fprintf('\nCalculating semblance...\n');
+fprintf('Please wait...\n\n');
+
+for iv = 1:nv
+
+    % Current trial velocity
+    vtrial = velocities(iv);
+
+    % Temporary NMO corrected gather
+    nmo_trial = zeros(nt,nh);
+
+    %% --------------------------------------------------------
+    % Apply NMO for current trial velocity
+    % --------------------------------------------------------
+
+    for ih = 1:nh
+
+        offset = h(ih);
+
+        % NMO equation:
+        %
+        % t = sqrt(t0^2 + h^2/v^2)
+
+        t_nmo = sqrt( ...
+            t.^2 + ...
+            (offset.^2 ./ vtrial.^2));
+
+        % Interpolate amplitude
+        nmo_trial(:,ih) = interp1( ...
+            t, ...
+            seismic_data(:,ih), ...
+            t_nmo, ...
+            'linear', ...
+            0);
+
+    end
+
+    %% --------------------------------------------------------
+    % Calculate semblance
+    %
+    % S(t,v) =
+    %
+    %        [sum(di)]^2
+    % --------------------------
+    %        N * sum(di^2)
+    %
+    %% --------------------------------------------------------
+
+    numerator = sum(nmo_trial,2).^2;
+
+    denominator = nh * sum(nmo_trial.^2,2);
+
+    S = zeros(nt,1);
+
+    valid = denominator > eps;
+
+    S(valid) = numerator(valid) ./ denominator(valid);
+
+    % Store result
+    semblance(:,iv) = S;
+
+    % Progress display
+    if mod(iv,10) == 0 || iv == nv
+
+        fprintf('Completed %d / %d velocities\n', ...
+            iv,nv);
+
+    end
+
+end
+
+fprintf('\nSemblance calculation completed.\n');
+
+%% ============================================================
+% 8. DISPLAY SEMBLANCE PANEL
+% ============================================================
+
+figure;
+
+imagesc(velocities,t,semblance);
+
+set(gca,'YDir','reverse');
+
+xlabel('Trial Velocity (m/s)');
+ylabel('Time (s)');
+
+title('Semblance Panel');
+
+colormap(jet);
+colorbar;
+
+caxis([0 1]);
+
+axis tight;
+
+%% ============================================================
+% 9. AUTOMATIC MAXIMUM SEMBLANCE VELOCITY
+% ============================================================
+
+[max_semblance,max_index] = max(semblance,[],2);
+
+auto_velocity = velocities(max_index);
+
+%% ============================================================
+% 10. DISPLAY AUTOMATIC VELOCITY CURVE
+% ============================================================
+
+figure;
+
+imagesc(velocities,t,semblance);
+
+set(gca,'YDir','reverse');
+
+hold on;
+
+plot(auto_velocity,t, ...
+    'w', ...
+    'LineWidth',1.5);
+
+xlabel('Velocity (m/s)');
+ylabel('Time (s)');
+
+title('Semblance Panel with Maximum Semblance Velocity');
+
+colormap(jet);
+colorbar;
+
+caxis([0 1]);
+
+axis tight;
+
+hold off;
+
+%% ============================================================
+% 11. MANUAL NMO VELOCITY PICKING
+% ============================================================
+%
+% Select strong semblance peaks.
+%
+% X-axis = velocity
+% Y-axis = time
+%
+% Click the velocity peaks and press ENTER when finished.
+%
+% The selected values are:
+%
+%       tnmo = time picks
+%       vnmo = velocity picks
+%
+% These values are then automatically used in Practical 6.
+% ============================================================
+
+fprintf('\n');
+fprintf('============================================\n');
+fprintf('NMO VELOCITY PICKING\n');
+fprintf('============================================\n');
+
+fprintf('\nClick the strong semblance peaks.\n');
+fprintf('Press ENTER after completing the picks.\n\n');
+
+figure;
+
+imagesc(velocities,t,semblance);
+
+set(gca,'YDir','reverse');
+
+xlabel('Velocity (m/s)');
+ylabel('Time (s)');
+
+title({'Pick NMO Velocities'; ...
+       'Click points and press ENTER when finished'});
+
+colormap(jet);
+colorbar;
+
+caxis([0 1]);
+
+axis tight;
+
+hold on;
+
+% Interactive velocity picking
+[vnmo,tnmo] = ginput;
+
+hold off;
+
+%% ============================================================
+% 12. CHECK VELOCITY PICKS
+% ============================================================
+
+if length(tnmo) < 2
+
+    error('At least two velocity picks are required.');
+
+end
+
+% Sort by increasing time
+[tnmo,sort_index] = sort(tnmo);
+
+vnmo = vnmo(sort_index);
+
+% Remove duplicate time values
+[tnmo,unique_index] = unique(tnmo);
+
+vnmo = vnmo(unique_index);
+
+%% ============================================================
+% 13. DISPLAY SELECTED VELOCITY PICKS
+% ============================================================
+
+fprintf('\n');
+fprintf('============================================\n');
+fprintf('SELECTED NMO VELOCITY PICKS\n');
+fprintf('============================================\n');
+
+fprintf('\n');
+fprintf('Time (s)       Velocity (m/s)\n');
+fprintf('--------------------------------\n');
+
+for k = 1:length(tnmo)
+
+    fprintf('%8.3f       %8.1f\n', ...
+        tnmo(k),vnmo(k));
+
+end
+
+%% ============================================================
+% 14. DISPLAY PICKS ON SEMBLANCE PANEL
+% ============================================================
+
+figure;
+
+imagesc(velocities,t,semblance);
+
+set(gca,'YDir','reverse');
+
+hold on;
+
+plot(vnmo,tnmo, ...
+    'wo-', ...
+    'LineWidth',2, ...
+    'MarkerFaceColor','w', ...
+    'MarkerSize',6);
+
+xlabel('Velocity (m/s)');
+ylabel('Time (s)');
+
+title('Semblance Panel with Selected NMO Velocity Picks');
+
+colormap(jet);
+colorbar;
+
+caxis([0 1]);
+
+axis tight;
+
+hold off;
+
+%% ============================================================
+% 15. INTERPOLATE VELOCITY FUNCTION
+% ============================================================
+
+v_nmo = interp1( ...
+    tnmo, ...
+    vnmo, ...
+    t, ...
+    'linear', ...
+    'extrap');
+
+%% ============================================================
+% 16. DISPLAY INTERPOLATED VELOCITY FUNCTION
+% ============================================================
+
+figure;
+
+plot(v_nmo,t, ...
+    'k', ...
+    'LineWidth',2);
+
+set(gca,'YDir','reverse');
+
+xlabel('NMO Velocity (m/s)');
+ylabel('Time (s)');
+
+title('Interpolated NMO Velocity Function');
+
+grid on;
+
+%% ============================================================
+%                  PRACTICAL 6
+%                  NMO CORRECTION
+% ============================================================
+
+fprintf('\n\n');
+fprintf('============================================\n');
+fprintf('       PRACTICAL 6: NMO CORRECTION\n');
+fprintf('============================================\n');
+
+%% ============================================================
+% 17. MAXIMUM ALLOWED STRETCH
+% ============================================================
+
+max_stretch = 30;       % Percentage
+
+fprintf('\nMaximum allowed stretch = %.1f %%\n', ...
+    max_stretch);
+
+%% ============================================================
+% 18. INITIALIZE NMO DATA
+% ============================================================
+
+nmo_data = zeros(nt,nh);
+
+stretch = zeros(nt,nh);
+
+%% ============================================================
+% 19. APPLY NMO CORRECTION
+% ============================================================
+
+fprintf('\nApplying NMO correction...\n');
+
+for ih = 1:nh
+
+    % Current offset
+    offset = h(ih);
+
+    % --------------------------------------------------------
+    % NMO equation:
+    %
+    % t_obs = sqrt(t0^2 + h^2/v_nmo(t0)^2)
+    % --------------------------------------------------------
+
+    t_nmo = sqrt( ...
+        t.^2 + ...
+        (offset.^2 ./ v_nmo.^2));
+
+    % --------------------------------------------------------
+    % Calculate stretch
+    %
+    % Stretch = (t_obs - t0) / t0
+    % --------------------------------------------------------
+
+    stretch(:,ih) = 0;
+
+    valid = t > 0;
+
+    stretch(valid,ih) = ...
+        (t_nmo(valid) - t(valid)) ./ t(valid);
+
+    % --------------------------------------------------------
+    % Interpolate original trace
+    % --------------------------------------------------------
+
+    trace = seismic_data(:,ih);
+
+    corrected_trace = interp1( ...
+        t, ...
+        trace, ...
+        t_nmo, ...
+        'linear', ...
+        0);
+
+    % --------------------------------------------------------
+    % Stretch mute
+    % --------------------------------------------------------
+
+    mute = stretch(:,ih) > max_stretch/100;
+
+    corrected_trace(mute) = 0;
+
+    % Store corrected trace
+    nmo_data(:,ih) = corrected_trace;
+
+end
+
+fprintf('NMO correction completed.\n');
+
+%% ============================================================
+% 20. DISPLAY NMO CORRECTED CMP GATHER
+% ============================================================
+
+figure;
+
+imagesc(h,t,nmo_data);
+
+set(gca,'YDir','reverse');
+
+xlabel('Offset (m)');
+ylabel('Time (s)');
+
+title('NMO Corrected CMP Gather');
+
+colormap(gray);
+colorbar;
+
+axis tight;
+
+%% ============================================================
+% 21. DISPLAY STRETCH FACTOR
+% ============================================================
+
+figure;
+
+imagesc(h,t,stretch*100);
+
+set(gca,'YDir','reverse');
+
+xlabel('Offset (m)');
+ylabel('Time (s)');
+
+title('NMO Stretch Factor (%)');
+
+colormap(jet);
+colorbar;
+
+axis tight;
+
+%% ============================================================
+% 22. BEFORE AND AFTER NMO COMPARISON
+% ============================================================
+
+figure;
+
+subplot(1,2,1);
+
+imagesc(h,t,seismic_data);
+
+set(gca,'YDir','reverse');
+
+xlabel('Offset (m)');
+ylabel('Time (s)');
+
+title('Before NMO');
+
+colormap(gray);
+colorbar;
+
+axis tight;
+
+
+subplot(1,2,2);
+
+imagesc(h,t,nmo_data);
+
+set(gca,'YDir','reverse');
+
+xlabel('Offset (m)');
+ylabel('Time (s)');
+
+title('After NMO');
+
+colormap(gray);
+colorbar;
+
+axis tight;
+
+sgtitle('CMP Gather Before and After NMO Correction');
+
+%% ============================================================
+% 23. SAVE ALL RESULTS
+% ============================================================
+
+save('oz_04_Practical7_6_results.mat', ...
+    'seismic_data', ...
+    'headers', ...
+    'h', ...
+    't', ...
+    'dt', ...
+    'semblance', ...
+    'velocities', ...
+    'max_semblance', ...
+    'auto_velocity', ...
+    'tnmo', ...
+    'vnmo', ...
+    'v_nmo', ...
+    'nmo_data', ...
+    'stretch', ...
+    'max_stretch');
+
+fprintf('\n');
+fprintf('============================================\n');
+fprintf('PROCESSING COMPLETED SUCCESSFULLY\n');
+fprintf('============================================\n');
+
+fprintf('\nOutput file:\n');
+fprintf('oz_04_Practical7_6_results.mat\n');
+
+fprintf('\nPractical 7 outputs:\n');
+fprintf('  1. Original CMP gather\n');
+fprintf('  2. Semblance panel\n');
+fprintf('  3. Maximum semblance velocity\n');
+fprintf('  4. Selected velocity picks\n');
+fprintf('  5. Interpolated NMO velocity function\n');
+
+fprintf('\nPractical 6 outputs:\n');
+fprintf('  1. NMO corrected CMP gather\n');
+fprintf('  2. Stretch factor panel\n');
+fprintf('  3. Before/after NMO comparison\n');

@@ -1,0 +1,151 @@
+% Practical 4 (Matlab): Apply different gain functions on seismic data (SEG-Y Input)
+% Note: Requires the SegyMAT toolbox (ReadSegy.m & WriteSegyStructure.m) in your MATLAB path.
+
+clear; clc; close all;
+
+%% --- 0. Load Data (.segy) ---
+segy_filename = 'oz_07.segy'; % Replace with your .segy filename
+
+% Read SEG-Y file using SegyMAT
+[D, SegyTraceHeaders, SegyHeader] = ReadSegy(segy_filename);
+D = double(D);
+
+% Extract sampling interval 'dt' directly from SEG-Y header (microseconds -> seconds)
+dt_us = SegyHeader.dt;
+if isempty(dt_us) || dt_us == 0
+    dt_us = SegyTraceHeaders(1).dt; % Fallback to trace header
+end
+dt = dt_us * 1e-6; % Sampling interval in seconds
+
+[num_samples, num_traces] = size(D);
+
+% Make time vector in seconds and milliseconds
+t = (0:num_samples-1)' * dt; % Time in seconds
+t_ms = t * 1000;             % Time in milliseconds
+
+fprintf('Loaded %s: %d samples x %d traces (dt = %.2f ms)\n', ...
+    segy_filename, num_samples, num_traces, dt * 1000);
+
+% Plot Raw Data for baseline comparison
+plot_wiggle(D, t_ms, sprintf('Raw Seismic Data (%s)', segy_filename));
+
+%% --- 1. Apply t^p gain ---
+disp('Applying t^p gain...');
+
+% Define window mask between tmin and tmax (automatically capped to trace length)
+tmin_ms = 500;
+tmax_ms = min(2500, t_ms(end));
+mask = (t_ms >= tmin_ms) & (t_ms <= tmax_ms);
+
+% Different p values to compare
+p_values = [1, 2]; 
+
+for p = p_values
+    % Apply t^p gain ONLY inside that mask, keep rest unchanged
+    gain = ones(size(t_ms));
+    gain(mask) = t_ms(mask).^p;
+    
+    D_gain = D .* gain;
+    
+    % Plotting
+    plot_wiggle(D_gain, t_ms, sprintf('t^p Gain (p = %d)', p));
+end
+
+%% --- 2. Apply exponential gain ---
+disp('Applying exponential gain...');
+
+% Using time vector in seconds for reasonable exponent values
+tmin_sec = tmin_ms / 1000;
+tmax_sec = tmax_ms / 1000;
+mask_sec = (t >= tmin_sec) & (t <= tmax_sec);
+
+% Different c (gain parameter) values to compare
+c_values = [1.5, 3.0]; 
+
+for c = c_values
+    % Inside mask: gain = exp(c*(t-tmin)), outside: 1
+    gain = ones(size(t));
+    gain(mask_sec) = exp(c * (t(mask_sec) - tmin_sec));
+    
+    % Multiply data by gain
+    D_exp = D .* gain;
+    
+    % Plotting
+    plot_wiggle(D_exp, t_ms, sprintf('Exponential Gain (c = %.1f)', c));
+end
+
+%% --- 3. Apply Automatic Gain Control (AGC) ---
+disp('Applying AGC...');
+
+% Define AGC window lengths in milliseconds and convert to samples using actual dt
+agc_windows_ms = [200, 500, 1200]; 
+
+for win_ms = agc_windows_ms
+    N = max(1, round(win_ms / (dt * 1000))); % Convert ms window to sample count
+    D_agc = zeros(size(D));
+    
+    % Loop over traces
+    for i = 1:num_traces
+        trace = D(:, i);
+        
+        % Compute envelope using moving average of absolute values
+        envelope = movmean(abs(trace), N);
+        
+        % Divide trace by envelope (avoid /0 with eps)
+        D_agc(:, i) = trace ./ (envelope + eps);
+    end
+    
+    % Plotting
+    plot_wiggle(D_agc, t_ms, sprintf('AGC (Window = %d ms / %d samples)', win_ms, N));
+end
+
+%% --- 4. Optional: Save Gained Output to .segy ---
+% Uncomment the lines below to export the last AGC-gained dataset to SEG-Y:
+% output_segy = 'oz_07_agc_gained.segy';
+% WriteSegyStructure(output_segy, SegyHeader, SegyTraceHeaders, D_agc);
+% fprintf('Saved gained data to %s\n', output_segy);
+
+
+%% --- Helper Function for Wiggle Plotting ---
+function plot_wiggle(data, t, title_str)
+    % This function handles the looping, normalization, shifting, and plotting
+    % of wiggle traces with filled positive lobes.
+    
+    figure; hold on;
+    num_traces = size(data, 2);
+    
+    for i = 1:num_traces
+        % Ensure data is double precision for plotting to avoid issues
+        trace = double(data(:, i));
+        
+        % Normalize each trace
+        max_val = max(abs(trace));
+        if max_val > 0
+            trace_norm = trace / max_val;
+        else
+            trace_norm = trace;
+        end
+        
+        % Shift horizontally by i
+        x = trace_norm + i;
+        
+        % Plot wiggle + fill positive lobes
+        x_fill = max(x, i); 
+        
+        % Fill the polygon (closes back to baseline on the left)
+        fill([x_fill; i; i], [t; t(end); t(1)], 'k', 'EdgeColor', 'none');
+        
+        % Plot the trace outline
+        plot(x, t, 'k');
+    end
+    
+    % Flip y-axis so time goes downward
+    set(gca, 'YDir', 'reverse');
+    
+    % Formatting
+    xlabel('Trace Number');
+    ylabel('Time (ms)');
+    title(title_str, 'Interpreter', 'none');
+    axis tight;
+    box on;
+end

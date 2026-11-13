@@ -1,0 +1,174 @@
+%% Practical-2: Frequency Analysis and Bandpass Filtering (SEG-Y Input)
+% Note: Requires the SegyMAT toolbox (ReadSegy.m & WriteSegy.m) in your MATLAB path.
+
+clear; clc; close all;
+
+%% a) Extract frequency components using Fourier Transform
+
+% 1. Load data (.segy)
+segy_filename = 'oz_07.segy'; % Replace with your .segy filename
+[data, SegyTraceHeaders, SegyHeader] = ReadSegy(segy_filename);
+data = double(data);
+
+% Extract sampling interval 'dt' directly from SEG-Y header (microseconds -> seconds)
+dt_us = SegyHeader.dt;
+if isempty(dt_us) || dt_us == 0
+    dt_us = SegyTraceHeaders(1).dt; % Fallback to trace header
+end
+dt = dt_us * 1e-6; % Sampling interval in seconds
+dt_ms = dt * 1000; % Sampling interval in milliseconds
+
+% Check size of seismic data [samples x traces]
+[n_samples, n_traces] = size(data);
+time_ms = (0:n_samples-1)' * dt_ms; % Vertical time axis in ms
+
+fprintf('Loaded %s: %d samples x %d traces (dt = %.2f ms)\n', ...
+    segy_filename, n_samples, n_traces, dt_ms);
+
+% 2. Set parameters
+Fs = 1/dt;                                    % Sampling frequency (Hz)
+NFFT = 2^nextpow2(n_samples);                 % FFT length
+f = Fs/2 * linspace(0, 1, NFFT/2 + 1);        % Frequency axis (positive half)
+
+% 3. FFT each trace
+% Take FFT, calculate magnitude using abs(), keep first half (positive frequencies)
+data_fft = fft(data, NFFT);
+mag_spectrum = abs(data_fft(1:NFFT/2 + 1, :));
+
+% 4. Average spectra
+% Sum over traces and divide by number of traces
+avg_spectrum_raw = sum(mag_spectrum, 2) / n_traces;
+
+% 5. Plot
+figure('Name', 'Raw Amplitude Spectrum');
+plot(f, avg_spectrum_raw, 'b', 'LineWidth', 1.5);
+title(['Average Amplitude Spectrum (Raw Data - ', segy_filename, ')'], 'Interpreter', 'none');
+xlabel('Frequency (Hz)');
+ylabel('Amplitude');
+grid on;
+
+%% b) Apply bandpass filter with different passbands
+
+% 1. Set filter parameters (Define cutoff frequencies in Hz)
+f_low = 10;   % Low stopband limit
+f1 = 15;      % Low passband limit
+f2 = 40;      % High passband limit
+f_high = 50;  % High stopband limit
+
+% 2 & 3. Build filter (trapezoid in frequency domain)
+% Constructing the positive frequency side of the filter
+H_half = zeros(NFFT/2 + 1, 1);
+for k = 1:length(f)
+    freq = f(k);
+    if freq >= f1 && freq <= f2
+        H_half(k) = 1;                                 % Passband
+    elseif freq > f_low && freq < f1
+        H_half(k) = (freq - f_low) / (f1 - f_low);     % Low transition zone
+    elseif freq > f2 && freq < f_high
+        H_half(k) = (f_high - freq) / (f_high - f2);   % High transition zone
+    else
+        H_half(k) = 0;                                 % Stopband
+    end
+end
+
+% Mirror filter for negative frequencies to ensure the inverse FFT is real
+H_full = [H_half; flipud(H_half(2:end-1))];
+
+% 4. Apply filter
+filtered_data = zeros(n_samples, n_traces);
+for j = 1:n_traces
+    trace_fft = data_fft(:, j);               % FFT of each trace
+    filtered_trace_fft = trace_fft .* H_full; % Multiply by trapezoidal filter
+    
+    % Inverse FFT and take real part to eliminate numerical artifacts
+    trace_ifft = real(ifft(filtered_trace_fft, NFFT)); 
+    filtered_data(:, j) = trace_ifft(1:n_samples); % Truncate back to original size
+end
+
+% 5. Save filtered data back to SEG-Y (preserving header metadata)
+output_segy = 'oz_07_filtered.segy';
+WriteSegyStructure(output_segy, SegyHeader, SegyTraceHeaders, filtered_data);
+disp(['Filtered data successfully saved to ', output_segy]);
+
+%% c) Display amplitude spectrum after filtering
+
+% FFT of filtered data
+filtered_data_fft = fft(filtered_data, NFFT);
+mag_spectrum_filtered = abs(filtered_data_fft(1:NFFT/2 + 1, :));
+
+% Average spectra of filtered data
+avg_spectrum_filtered = sum(mag_spectrum_filtered, 2) / n_traces;
+
+% Plot frequency components of filtered data
+figure('Name', 'Filtered Amplitude Spectrum');
+plot(f, avg_spectrum_filtered, 'r', 'LineWidth', 1.5);
+title('Average Amplitude Spectrum (Filtered Data)');
+xlabel('Frequency (Hz)');
+ylabel('Amplitude');
+grid on;
+
+%% d) Display the data after filtering
+
+% Organize raw vs filtered comparison using subplots
+figure('Name', 'Seismic Data Comparison', 'Position', [100, 100, 1000, 500]);
+
+% Raw Data Subplot
+subplot(1, 2, 1);
+imagesc(1:n_traces, time_ms, data);
+colormap(gray); 
+title('Raw Seismic Data');
+xlabel('Trace Number');
+ylabel('Two-Way Travel Time (ms)');
+
+% Filtered Data Subplot
+subplot(1, 2, 2);
+imagesc(1:n_traces, time_ms, filtered_data);
+colormap(gray);
+title('Filtered Seismic Data (Bandpass)');
+xlabel('Trace Number');
+ylabel('Two-Way Travel Time (ms)');
+
+
+%% e) Display seismic wiggle traces
+
+figure('Name', 'Seismic Wiggle Comparison', 'Position', [100, 100, 1200, 600]);
+
+% Raw Data Wiggle Plot
+subplot(1, 2, 1);
+plot_wiggle(data, time_ms);
+title('Raw Seismic Data (Wiggle)');
+xlabel('Trace Number');
+ylabel('Two-Way Travel Time (ms)');
+
+% Filtered Data Wiggle Plot
+subplot(1, 2, 2);
+plot_wiggle(filtered_data, time_ms);
+title('Filtered Seismic Data (Wiggle)');
+xlabel('Trace Number');
+ylabel('Two-Way Travel Time (ms)');
+
+%% Helper function for wiggle display
+function plot_wiggle(d, t)
+[~, ntr] = size(d);
+
+% Normalize trace amplitude for display spacing
+scale = 0.8 / max(abs(d(:)));
+
+hold on;
+for i = 1:ntr
+    trace = d(:, i) * scale;
+
+    % Trace wiggle line
+    plot(i + trace, t, 'k', 'LineWidth', 0.5);
+
+    % Positive area fill (variable area)
+    pos_trace = trace;
+    pos_trace(pos_trace < 0) = 0;
+    patch([i + pos_trace; i], [t; t(end)], [0 0 0], 'EdgeColor', 'none', 'FaceColor', 'k');
+end
+hold off;
+
+axis ij; % Flip vertical axis so time increases downward
+xlim([0.5, ntr + 0.5]);
+ylim([t(1), t(end)]);
+end

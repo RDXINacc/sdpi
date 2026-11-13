@@ -1,0 +1,363 @@
+%% Practical-5: Autocorrelation and Spiking Deconvolution (SEG-Y Input)
+% Objective:
+% Enhance the vertical resolution of seismic data using
+% autocorrelation and spiking deconvolution.
+%
+% Note: Requires the SegyMAT toolbox (ReadSegy.m) in your MATLAB path.
+
+clear;
+clc;
+close all;
+
+%% ============================================================
+% (a) LOAD SEISMIC DATA (.segy)
+% =============================================================
+
+segy_filename = 'oz_07.segy'; % Replace with your .segy filename
+
+% Read SEG-Y file using SegyMAT
+% seismic_data: [nSamples x nTraces] matrix
+% SegyTraceHeaders: trace-by-trace headers
+% SegyHeader: binary and textual file headers
+[seismic_data, SegyTraceHeaders, SegyHeader] = ReadSegy(segy_filename);
+
+seismic_data = double(seismic_data);
+
+% Extract sampling interval (dt) in microseconds -> convert to seconds & ms
+dt_us = SegyHeader.dt; 
+if isempty(dt_us) || dt_us == 0
+    dt_us = SegyTraceHeaders(1).dt; % Fallback to trace header
+end
+dt_sec = dt_us * 1e-6;
+dt_ms  = dt_sec * 1000;
+
+% Check dimensions [samples x traces]
+[nSamples, nTraces] = size(seismic_data);
+
+% Time axis in milliseconds
+time_ms = (0:nSamples-1) * dt_ms;
+
+fprintf('\nLoaded SEG-Y File: %s\n', segy_filename);
+fprintf('Data used for processing: %d samples x %d traces\n', nSamples, nTraces);
+fprintf('Sampling interval (dt)  : %.2f ms (%.4f s)\n', dt_ms, dt_sec);
+
+
+%% ============================================================
+% DISPLAY ORIGINAL SEISMIC GATHER
+% =============================================================
+
+figure('Name','Original Seismic Data');
+
+imagesc(1:nTraces, time_ms, seismic_data);
+colormap(gray);
+colorbar;
+set(gca, 'YDir', 'reverse');
+
+xlabel('Trace Number');
+ylabel('Two-Way Travel Time (ms)');
+title(['Original Seismic Data - ', segy_filename], 'Interpreter', 'none');
+axis tight;
+
+
+%% ============================================================
+% (b) AUTOCORRELATION ANALYSIS
+% ============================================================
+
+% Select representative trace
+representative_trace_number = round(nTraces/2);
+trace = seismic_data(:, representative_trace_number);
+
+% Remove DC component and normalize trace
+trace = trace - mean(trace);
+trace = trace ./ max(abs(trace));
+
+% Calculate autocorrelation
+[acf, lags] = xcorr(trace, 'coeff');
+lags_ms = lags * dt_ms; % Convert lags from samples to milliseconds
+
+% Plot representative trace
+figure('Name','Representative Seismic Trace');
+
+plot(time_ms, trace, 'k', 'LineWidth', 1.2);
+grid on;
+xlabel('Time (ms)');
+ylabel('Normalized Amplitude');
+title(['Representative Trace - Trace ', num2str(representative_trace_number)]);
+
+
+%% ============================================================
+% DISPLAY AUTOCORRELATION
+% =============================================================
+
+figure('Name','Autocorrelation');
+
+plot(lags_ms, acf, 'LineWidth', 1.3);
+grid on;
+xlabel('Lag (ms)');
+ylabel('Normalized Autocorrelation');
+title('Autocorrelation of Representative Seismic Trace');
+xlim([-200*dt_ms, 200*dt_ms]);
+
+
+%% ============================================================
+% ESTIMATE DOMINANT PERIOD FROM AUTOCORRELATION
+% =============================================================
+
+% Positive lags only
+positive_lags = lags(lags > 0);
+positive_acf  = acf(lags > 0);
+
+% Limit search to a reasonable range (e.g., first 100 samples)
+maxLag = min(100, length(positive_lags));
+search_lags = positive_lags(1:maxLag);
+search_acf  = positive_acf(1:maxLag);
+
+% Find maximum positive autocorrelation
+[~, index_peak] = max(search_acf);
+dominant_period_samples = search_lags(index_peak);
+dominant_period_ms      = dominant_period_samples * dt_ms;
+
+fprintf('\n============================================\n');
+fprintf('AUTOCORRELATION ANALYSIS\n');
+fprintf('============================================\n');
+fprintf('Representative trace    = %d\n', representative_trace_number);
+fprintf('Estimated dominant period = %d samples (%.2f ms)\n', ...
+    dominant_period_samples, dominant_period_ms);
+
+% Mark dominant period on autocorrelation plot
+figure('Name','Autocorrelation with Dominant Period');
+
+plot(lags_ms, acf, 'b', 'LineWidth', 1.3);
+hold on;
+plot(dominant_period_ms, acf(lags == dominant_period_samples), ...
+     'ro', 'MarkerSize', 8, 'LineWidth', 2);
+xline(0, 'k--');
+grid on;
+
+xlabel('Lag (ms)');
+ylabel('Normalized Autocorrelation');
+title('Autocorrelation and Estimated Dominant Period');
+legend('Autocorrelation', 'Dominant Period', 'Zero Lag');
+xlim([-100*dt_ms, 100*dt_ms]);
+
+
+%% ============================================================
+% ESTIMATE WAVELET LENGTH
+% =============================================================
+
+% Use approximately two dominant periods as wavelet length
+wavelet_length = 2 * dominant_period_samples + 1;
+wavelet_length = min(wavelet_length, 101); % Cap filter length
+
+fprintf('Estimated wavelet length  = %d samples (%.2f ms)\n', ...
+    wavelet_length, wavelet_length * dt_ms);
+
+
+%% ============================================================
+% (c) DESIGN SPIKING DECONVOLUTION FILTER
+% ============================================================
+
+zero_index = find(lags == 0);
+M = wavelet_length;
+
+if zero_index + M - 1 > length(acf)
+    M = length(acf) - zero_index + 1;
+end
+
+r = acf(zero_index : zero_index + M - 1);
+r(1) = 1; % Ensure zero-lag autocorrelation is 1
+
+
+%% ============================================================
+% CREATE TOEPLITZ AUTOCORRELATION MATRIX & SOLVE WIENER FILTER
+% =============================================================
+
+R = toeplitz(r);
+
+% Small prewhitening / stabilization term
+epsilon = 1e-4;
+R = R + epsilon * eye(size(R));
+
+% Spiking delay (1 sample)
+spike_delay = 1;
+d = zeros(M, 1);
+
+if spike_delay + 1 <= M
+    d(spike_delay + 1) = 1;
+else
+    d(1) = 1;
+end
+
+% Solve R * filter = d
+spiking_filter = R \ d;
+
+fprintf('\n============================================\n');
+fprintf('SPIKING DECONVOLUTION FILTER\n');
+fprintf('============================================\n');
+fprintf('Filter length = %d samples (%.2f ms)\n', ...
+    length(spiking_filter), length(spiking_filter)*dt_ms);
+fprintf('Spiking delay = %d sample (%.2f ms)\n', ...
+    spike_delay, spike_delay*dt_ms);
+
+
+%% ============================================================
+% DISPLAY SPIKING FILTER
+% =============================================================
+
+figure('Name','Spiking Deconvolution Filter');
+
+filter_time_ms = (0:length(spiking_filter)-1) * dt_ms;
+stem(filter_time_ms, spiking_filter, 'filled');
+grid on;
+xlabel('Time (ms)');
+ylabel('Amplitude');
+title('Least-Squares Spiking Deconvolution Filter');
+
+
+%% ============================================================
+% (d) APPLY SPIKING DECONVOLUTION
+% =============================================================
+
+deconvolved_data = zeros(size(seismic_data));
+
+fprintf('\nApplying deconvolution to %d traces...\n', nTraces);
+
+for i = 1:nTraces
+    current_trace = seismic_data(:, i);
+    current_trace = current_trace - mean(current_trace); % Remove DC
+    filtered_trace = conv(current_trace, spiking_filter, 'same');
+    deconvolved_data(:, i) = filtered_trace;
+end
+
+fprintf('Deconvolution completed.\n');
+
+
+%% ============================================================
+% NORMALIZE AND DISPLAY DECONVOLVED SEISMIC DATA
+% =============================================================
+
+display_original    = seismic_data ./ max(abs(seismic_data(:)));
+display_deconvolved = deconvolved_data ./ max(abs(deconvolved_data(:)));
+
+figure('Name','Deconvolved Seismic Data');
+
+imagesc(1:nTraces, time_ms, display_deconvolved);
+colormap(gray);
+colorbar;
+set(gca, 'YDir', 'reverse');
+
+xlabel('Trace Number');
+ylabel('Two-Way Travel Time (ms)');
+title('Seismic Data After Spiking Deconvolution');
+axis tight;
+
+
+%% ============================================================
+% (e) COMPARE ORIGINAL AND DECONVOLVED DATA
+% =============================================================
+
+figure('Name','Original vs Deconvolved');
+
+subplot(1,2,1);
+imagesc(1:nTraces, time_ms, display_original);
+colormap(gray);
+colorbar;
+set(gca, 'YDir', 'reverse');
+xlabel('Trace Number');
+ylabel('Two-Way Travel Time (ms)');
+title('Original Seismic Data');
+axis tight;
+
+subplot(1,2,2);
+imagesc(1:nTraces, time_ms, display_deconvolved);
+colormap(gray);
+colorbar;
+set(gca, 'YDir', 'reverse');
+xlabel('Trace Number');
+ylabel('Two-Way Travel Time (ms)');
+title('After Spiking Deconvolution');
+axis tight;
+
+
+%% ============================================================
+% COMPARE REPRESENTATIVE TRACE
+% =============================================================
+
+original_trace    = seismic_data(:, representative_trace_number);
+deconvolved_trace = deconvolved_data(:, representative_trace_number);
+
+original_trace    = original_trace ./ max(abs(original_trace));
+deconvolved_trace = deconvolved_trace ./ max(abs(deconvolved_trace));
+
+figure('Name','Trace Comparison');
+
+subplot(2,1,1);
+plot(time_ms, original_trace, 'k', 'LineWidth', 1);
+grid on;
+xlabel('Time (ms)');
+ylabel('Amplitude');
+title('Original Representative Trace');
+
+subplot(2,1,2);
+plot(time_ms, deconvolved_trace, 'b', 'LineWidth', 1);
+grid on;
+xlabel('Time (ms)');
+ylabel('Amplitude');
+title('Deconvolved Representative Trace');
+
+
+%% ============================================================
+% AUTOCORRELATION AFTER DECONVOLUTION
+% =============================================================
+
+[acf_deconv, lags_deconv] = xcorr(deconvolved_trace, 'coeff');
+lags_deconv_ms = lags_deconv * dt_ms;
+
+figure('Name','Autocorrelation Comparison');
+
+plot(lags_ms, acf, 'k', 'LineWidth', 1.2);
+hold on;
+plot(lags_deconv_ms, acf_deconv, 'b', 'LineWidth', 1.2);
+grid on;
+
+xlabel('Lag (ms)');
+ylabel('Normalized Autocorrelation');
+title('Autocorrelation Before and After Deconvolution');
+legend('Original', 'Deconvolved');
+xlim([-100*dt_ms, 100*dt_ms]);
+
+
+%% ============================================================
+% OPTIONAL: EXPORT DECONVOLVED DATA TO NEW .SEGY FILE
+% =============================================================
+% Uncomment the line below if you want to save the output as SEG-Y:
+% WriteSegy('oz_07_deconvolved.segy', deconvolved_data, 'dt', dt_us);
+
+
+%% ============================================================
+% FINAL SUMMARY
+% =============================================================
+
+fprintf('\n============================================\n');
+fprintf('PRACTICAL-5 RESULTS\n');
+fprintf('============================================\n');
+fprintf('Input SEG-Y File        : %s\n', segy_filename);
+fprintf('Number of samples       : %d\n', nSamples);
+fprintf('Number of traces        : %d\n', nTraces);
+fprintf('Sampling interval (dt)  : %.2f ms\n', dt_ms);
+fprintf('Representative trace    : %d\n', representative_trace_number);
+fprintf('Dominant period         : %d samples (%.2f ms)\n', ...
+    dominant_period_samples, dominant_period_ms);
+fprintf('Estimated wavelet length: %d samples (%.2f ms)\n', ...
+    wavelet_length, wavelet_length * dt_ms);
+fprintf('Spiking delay           : %d sample (%.2f ms)\n', ...
+    spike_delay, spike_delay * dt_ms);
+fprintf('Deconvolution completed successfully.\n');
+
+fprintf('\nObservation:\n');
+fprintf(['After spiking deconvolution, the seismic wavelet is\n' ...
+         'compressed toward a spike, which generally improves\n' ...
+         'vertical resolution and reflector separation.\n']);
+fprintf(['Noise may also become more visible because inverse\n' ...
+         'filtering can amplify high-frequency components.\n']);
+fprintf('============================================\n');

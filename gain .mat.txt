@@ -1,0 +1,133 @@
+% Practical 4 (Matlab): Apply different gain functions on seismic data
+clear; clc; close all;
+
+%% --- 0. Load Data ---
+% Load the provided data file
+load('oz_07.mat'); 
+
+% Map the loaded variable to 'D' for the rest of the script
+D = seismic_data; 
+
+% The file does not contain a dt variable, so we assume standard 4ms
+dt = 0.004; 
+
+[num_samples, num_traces] = size(D);
+
+%% --- 1. Apply t^p gain ---
+disp('Applying t^p gain...');
+
+% Make time vector (t_ms) in milliseconds
+t = (0:num_samples-1)' * dt; % Time in seconds
+t_ms = t * 1000;             % Time in milliseconds
+
+% Define window mask between tmin and tmax
+tmin_ms = 500;  % Adjust based on your data's target reflections
+tmax_ms = 2500; % Adjust based on your data's target reflections
+mask = (t_ms >= tmin_ms) & (t_ms <= tmax_ms);
+
+% Different p values to compare
+p_values = [1, 2]; 
+
+for p = p_values
+    % Apply t^p gain ONLY inside that mask, keep rest unchanged
+    gain = ones(size(t_ms));
+    gain(mask) = t_ms(mask).^p;
+    
+    D_gain = D .* gain;
+    
+    % Plotting
+    plot_wiggle(D_gain, t_ms, sprintf('t^p Gain (p = %d)', p));
+end
+
+%% --- 2. Apply exponential gain ---
+disp('Applying exponential gain...');
+
+% Using time vector in seconds for reasonable exponent values
+tmin_sec = tmin_ms / 1000;
+tmax_sec = tmax_ms / 1000;
+mask_sec = (t >= tmin_sec) & (t <= tmax_sec);
+
+% Different c (gain parameter) values to compare
+c_values = [1.5, 3.0]; 
+
+for c = c_values
+    % Inside mask: gain = exp(c*(t-tmin)), outside: 1
+    gain = ones(size(t));
+    gain(mask_sec) = exp(c * (t(mask_sec) - tmin_sec));
+    
+    % Multiply data by gain
+    D_exp = D .* gain;
+    
+    % Plotting
+    plot_wiggle(D_exp, t_ms, sprintf('Exponential Gain (c = %.1f)', c));
+end
+
+%% --- 3. Apply Automatic Gain Control (AGC) ---
+disp('Applying AGC...');
+
+% Different AGC window lengths (N) in samples
+N_values = [50, 125, 300]; % 50 samples = 200ms window, 125 samples = 500ms window
+
+for N = N_values
+    D_agc = zeros(size(D));
+    
+    % Loop over traces
+    for i = 1:num_traces
+        trace = D(:, i);
+        
+        % Compute envelope using moving average of absolute values
+        envelope = movmean(abs(trace), N);
+        
+        % Divide trace by envelope (avoid /0 with eps)
+        D_agc(:, i) = trace ./ (envelope + eps);
+    end
+    
+    % Plotting
+    plot_wiggle(D_agc, t_ms, sprintf('AGC (Window N = %d samples)', N));
+end
+
+
+%% --- Helper Function for Wiggle Plotting ---
+function plot_wiggle(data, t, title_str)
+    % This function handles the looping, normalization, shifting, and plotting
+    % of wiggle traces with filled positive lobes.
+    
+    figure; hold on;
+    num_traces = size(data, 2);
+    
+    for i = 1:num_traces
+        % Ensure data is double precision for plotting to avoid issues
+        trace = double(data(:, i));
+        
+        % Normalize each trace
+        max_val = max(abs(trace));
+        if max_val > 0
+            trace_norm = trace / max_val;
+        else
+            trace_norm = trace;
+        end
+        
+        % Shift horizontally by i
+        x = trace_norm + i;
+        
+        % Plot wiggle + fill positive lobes
+        % To fill positive lobes easily: take max of shifted trace and baseline
+        x_fill = max(x, i); 
+        
+        % Fill the polygon (closes back to baseline on the left)
+        fill([x_fill; i; i], [t; t(end); t(1)], 'k', 'EdgeColor', 'none');
+        
+        % Plot the trace outline
+        plot(x, t, 'k');
+    end
+    
+    % Flip y-axis so time goes downward
+    set(gca, 'YDir', 'reverse');
+    
+    % Formatting
+    xlabel('Trace Number');
+    ylabel('Time (ms)');
+    title(title_str);
+    axis tight;
+    box on;
+end

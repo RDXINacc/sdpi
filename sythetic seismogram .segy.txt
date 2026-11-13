@@ -1,0 +1,80 @@
+% MATLAB script to construct synthetic seismic trace (Robinson & Treitel, 1980)
+clc;
+clear;
+close all;
+
+%% 1. Input Model Data (Table 1)
+TWT = (0:40:880)'; % Two-way travel time in ms (sample interval dt = 40 ms)
+
+% P-wave Velocity (m/s)
+Vp = [2250; 2250; 2250; ...                 % Upp Shale (0-80 ms)
+    2000; 2000; 2000; 2000; 2000; ...     % Gas Sand (120-280 ms)
+    2250; 2250; 2250; 2250; 2250; ...     % Lower Shale (320-480 ms)
+    2500; 2500; 2500; 2500; 2500; ...     % Wet Sand (520-680 ms)
+    3500; 3500; 3500; 3500; 3500];        % Wet Limestone (720-880 ms)
+
+% Density (g/cc)
+Rho = [2.00; 2.00; 2.00; ...                % Upp Shale
+    1.95; 1.95; 1.95; 1.95; 1.95; ...    % Gas Sand
+    2.00; 2.00; 2.00; 2.00; 2.00; ...    % Lower Shale
+    2.11; 2.11; 2.11; 2.11; 2.11; ...    % Wet Sand
+    2.50; 2.50; 2.50; 2.50; 2.50];       % Wet Limestone
+
+%% 2. Acoustic Impedance Calculation
+% Z = Vp * Rho
+Z = Vp .* Rho;
+
+%% 3. Reflection Coefficient (Rc) Calculation
+% Rc(i) = (Z(i) - Z(i-1)) / (Z(i) + Z(i-1))
+N = length(TWT);
+Rc = zeros(N, 1);
+
+for i = 2:N
+    Rc(i) = (Z(i) - Z(i-1)) / (Z(i) + Z(i-1));
+end
+
+%% 4. Convolution with Zero-Phase Wavelet Wt = [-20, 70, -20]
+% S(t) = Rc(t) * W(t)
+Wt = [-20, 70, -20];
+
+% Convolve using 'same' to keep the wavelet centered at zero lag
+St = conv(Rc, Wt, 'same');
+
+%% 5. Display Formatted Results Table
+ResultsTable = table(TWT, Vp, Rho, Z, Rc, St, ...
+    'VariableNames', {'TWT_ms', 'Vp_mps', 'Density_gcc', 'Impedance_Z', 'Rc', 'Synthetic_St'});
+disp('--- Synthetic Seismic Trace Calculation Results ---');
+disp(ResultsTable);
+
+%% 6. Plotting the Profiles
+figure('Color', 'w', 'Position', [100, 100, 900, 600]);
+
+% Subplot 1: Acoustic Impedance
+subplot(1, 3, 1);
+plot(Z, TWT, 'b-', 'LineWidth', 1.5);
+set(gca, 'YDir', 'reverse');
+xlabel('Impedance (g/cc \cdot m/s)');
+ylabel('TWT (ms)');
+title('Acoustic Impedance');
+grid on;
+
+% Subplot 2: Reflection Coefficients
+subplot(1, 3, 2);
+stem(Rc, TWT, 'r', 'filled', 'LineWidth', 1.2, 'BaseValue', 0);
+set(gca, 'YDir', 'reverse');
+xlabel('Reflection Coeff (Rc)');
+title('Reflectivity Series');
+xlim([-0.35, 0.35]);
+grid on;
+
+% Subplot 3: Synthetic Seismic Trace
+subplot(1, 3, 3);
+plot(St, TWT, 'k-', 'LineWidth', 1.5);
+hold on;
+% Fill peaks (positive) and troughs (negative)
+patch([max(St, 0); 0], [TWT; TWT(end)], 'k', 'FaceAlpha', 0.6);
+patch([min(St, 0); 0], [TWT; TWT(end)], 'w', 'EdgeColor', 'k');
+set(gca, 'YDir', 'reverse');
+xlabel('Amplitude');
+title('Synthetic Trace (S_t)');
+grid on;

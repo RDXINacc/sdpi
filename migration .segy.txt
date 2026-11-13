@@ -1,0 +1,200 @@
+%% ============================================================
+% PRACTICAL 10: STACKING & STOLT (F-K) MIGRATION (SEG-Y Input)
+%
+% 1. Load NMO-corrected or stacked seismic data from a .segy file.
+% 2. Apply Stolt migration in f-k domain using constant velocity.
+% 3. Apply gain to enhance visibility and compare results.
+% Note: Requires the SegyMAT toolbox (ReadSegy.m & WriteSegyStructure.m).
+% ============================================================
+clear;
+clc;
+close all;
+
+%% 1. LOAD DATA (.segy) & STACKING
+segy_file = 'oz_04_stacked.segy'; % Replace with your NMO-corrected or stacked .segy file
+
+if exist(segy_file, 'file') == 2
+    [segy_data, SegyTraceHeaders, SegyHeader] = ReadSegy(segy_file);
+    segy_data = double(segy_data);
+    
+    % Extract sampling interval 'dt' (microseconds -> seconds)
+    dt_us = SegyHeader.dt;
+    if isempty(dt_us) || dt_us == 0
+        dt_us = SegyTraceHeaders(1).dt;
+    end
+    dt = dt_us * 1e-6;
+    
+    [nt, n_traces] = size(segy_data);
+    t = (0:nt-1)' * dt;
+    
+    % Extract CMP spacing 'dx' from trace coordinates (SourceX / GroupX / cdpX) if available
+    dx = 25; % Default CMP spacing (m)
+    if isfield(SegyTraceHeaders, 'SourceX') && n_traces > 1
+        coords = [SegyTraceHeaders.SourceX];
+        if isfield(SegyTraceHeaders, 'ScalarCoord') && SegyTraceHeaders(1).ScalarCoord < 0
+            coords = coords / abs(SegyTraceHeaders(1).ScalarCoord);
+        elseif isfield(SegyTraceHeaders, 'ScalarCoord') && SegyTraceHeaders(1).ScalarCoord > 0
+            coords = coords * SegyTraceHeaders(1).ScalarCoord;
+        end
+        dx_est = median(abs(diff(coords)));
+        if ~isnan(dx_est) && dx_est > 0
+            dx = dx_est;
+        end
+    end
+    
+    % Handle single CMP gather (<= 48 traces) vs full post-stack section
+    if n_traces <= 48
+        % Department stack equivalent
+        single_stack = sum(segy_data, 2) ./ max(sum(segy_data ~= 0, 2), 1);
+        
+        nx = 96;
+        x  = (0:nx-1) * dx;
+        stacked_section = repmat(single_stack, 1, nx);
+        
+        % Synthetic dipping reflector to evaluate dip migration
+        v_dip = 2200;
+        for ix = 1:nx
+            t_dip = 1.8 + (x(ix) - mean(x)) * sind(20) / (v_dip / 2);
+            idx = round(t_dip / dt);
+            if idx > 10 && idx < length(t)-10
+                stacked_section(idx-2:idx+2, ix) = stacked_section(idx-2:idx+2, ix) + ...
+                    [0.2; 0.6; 1.0; 0.6; 0.2] * max(single_stack);
+            end
+        end
+    else
+        stacked_section = segy_data;
+        nx = n_traces;
+        x  = (0:nx-1) * dx;
+    end
+    fprintf('Loaded SEG-Y File: %s (dt = %.4f s, dx = %.1f m)\n', segy_file, dt, dx);
+else
+    % Fallback synthetic stacked section if .segy is not found
+    warning('SEG-Y file not found. Generating synthetic stacked section.');
+    dt = 0.004;
+    t  = (0:1500)' * dt;
+    nt = length(t);
+    dx = 25;
+    nx = 100;
+    x  = (0:nx-1) * dx;
+    stacked_section = zeros(nt, nx);
+    
+    for ix = 1:nx
+        i1 = round(1.0 / dt);
+        stacked_section(i1, ix) = 1.0;
+        t_dip = 1.5 + (ix - nx/2) * dx * sind(15) / (2000 / 2);
+        i2 = round(t_dip / dt);
+        if i2 > 0 && i2 <= nt
+            stacked_section(i2, ix) = 1.0;
+        end
+    end
+end
+
+[nt, nx] = size(stacked_section);
+fprintf('Stacked section: %d time samples x %d traces\n', nt, nx);
+
+%% 2. MIGRATION PARAMETERS (CONSTANT VELOCITY)
+% Exploding reflector model uses half-velocity: v_mig = v / 2
+v_medium = 2200;         % Medium velocity (m/s)
+v_mig    = v_medium / 2; % Migration velocity (m/s)
+fprintf('Migration velocity (half-velocity) = %.1f m/s\n', v_mig);
+
+%% 3. SPATIAL BOUNDARY TAPERING & 2D FFT
+% Taper trace boundaries along x to suppress Fourier edge-diffraction smiles
+taper_x = tukeywin(nx, 0.15)'; % 15% cosine taper
+stacked_tapered = stacked_section .* repmat(taper_x, nt, 1);
+
+nfft_t = 2^nextpow2(nt * 2);
+nfft_x = 2^nextpow2(nx * 2);
+
+% Frequency axes
+fs = 1 / dt;
+f  = (-nfft_t/2 : (nfft_t/2 - 1)) * (fs / nfft_t);
+wz = 2 * pi * f(:); % Migrated vertical frequency axis (nfft_t x 1 column)
+
+ks = 1 / dx;
+kx_axis = (-nfft_x/2 : (nfft_x/2 - 1)) * (ks / nfft_x);
+kx = 2 * pi * kx_axis(:)'; % Spatial wavenumber axis (1 x nfft_x row)
+
+% Forward 2D FFT: (t, x) -> (w, kx)
+D_wk = fftshift(fft2(stacked_tapered, nfft_t, nfft_x));
+
+%% 4. STOLT INVERSE DISPERSION MAPPING
+M_wk = zeros(nfft_t, nfft_x);
+
+fprintf('Applying Stolt migration mapping...\n');
+for ik = 1:nfft_x
+    k_val = kx(ik);
+    
+    % Propagating condition: non-evanescent wavefield
+    arg = wz.^2 - (v_mig * k_val)^2;
+    valid = arg > 0;
+    
+    w_input = zeros(size(wz));
+    w_input(valid) = sign(wz(valid)) .* sqrt(arg(valid));
+    
+    % Obliquity / Jacobian scale factor: d(w)/d(wz)
+    jacobian = zeros(size(wz));
+    jacobian(valid) = abs(wz(valid)) ./ max(abs(w_input(valid)), eps);
+    
+    % 1D interpolation along unmigrated frequency column
+    interpolated = interp1(wz, D_wk(:, ik), w_input, 'linear', 0);
+    M_wk(:, ik) = interpolated .* jacobian;
+end
+
+%% 5. INVERSE 2D FFT: (w, kx) -> (t, x)
+migrated_padded = real(ifft2(ifftshift(M_wk)));
+migrated_data   = migrated_padded(1:nt, 1:nx);
+
+%% 6. GAIN ENHANCEMENT (AGC - AUTOMATIC GAIN CONTROL)
+agc_window_len = max(1, round(0.3 / dt)); % 300 ms window
+h_win = hamming(agc_window_len);
+h_win = h_win / sum(h_win);
+
+stacked_gained  = zeros(nt, nx);
+migrated_gained = zeros(nt, nx);
+
+for ix = 1:nx
+    env1 = sqrt(conv(stacked_section(:, ix).^2, h_win, 'same') + 1e-12);
+    stacked_gained(:, ix) = stacked_section(:, ix) ./ env1;
+    
+    env2 = sqrt(conv(migrated_data(:, ix).^2, h_win, 'same') + 1e-12);
+    migrated_gained(:, ix) = migrated_data(:, ix) ./ env2;
+end
+
+%% 7. PLOT AND COMPARE RESULTS
+figure('Name', 'Practical 10: Stolt Migration', 'NumberTitle', 'off', 'Position', [80 80 1200 600]);
+
+% Before Migration (Stacked Section)
+subplot(1, 2, 1);
+imagesc(x, t, stacked_gained);
+set(gca, 'YDir', 'reverse');
+xlabel('Distance / CMP Position (m)');
+ylabel('Two-Way Traveltime (s)');
+title('Before Migration (Stacked Section with Gain)');
+colormap(gray);
+colorbar;
+clim([-3 3]);
+axis tight;
+
+% After Stolt Migration
+subplot(1, 2, 2);
+imagesc(x, t, migrated_gained);
+set(gca, 'YDir', 'reverse');
+xlabel('Distance / CMP Position (m)');
+ylabel('Two-Way Traveltime (s)');
+title('After Stolt Migration (Migrated Section with Gain)');
+colormap(gray);
+colorbar;
+clim([-3 3]);
+axis tight;
+
+sgtitle(sprintf('Practical 10: Comparison Before and After Stolt F-K Migration (v = %d m/s)', v_medium));
+
+%% 8. SAVE OUTPUT TO .SEGY
+output_segy = 'practical10_stolt_migrated.segy';
+if exist('SegyHeader', 'var') && exist('SegyTraceHeaders', 'var') && size(migrated_data, 2) == length(SegyTraceHeaders)
+    WriteSegyStructure(output_segy, SegyHeader, SegyTraceHeaders, migrated_data);
+else
+    WriteSegy(output_segy, migrated_data, 'dt', dt * 1e6, 'dx', dx);
+end
+fprintf('Migrated section saved to %s\n', output_segy);
